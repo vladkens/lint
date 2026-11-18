@@ -174,22 +174,52 @@ mod tests {
 }
 """
 
+ALLOW = """
+#![allow(clippy::too_many_arguments)] // expect: allow
+#[expect(clippy::too_many_arguments)] // expect: allow
+fn a() {}
+#[expect(clippy::too_many_arguments, reason = "the API")]
+fn b() {}
+#[cfg_attr(windows, allow(clippy::cast_possible_truncation))] // expect: allow
+fn c() {}
+#[expect( // expect: allow
+    clippy::too_many_arguments,
+    clippy::type_complexity,
+)]
+fn d() {}
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the API",
+)]
+fn e() {}
+#[allow(dead_code)] // expect: dead-code
+fn f() {}
+#[cfg_attr(unix, expect(clippy::type_complexity), expect(clippy::x, reason = "y"))] // expect: allow
+fn g() {}
+#[derive(Debug)]
+#[serde(rename = "allow(x)")]
+#[case(Some(1).expect("one"))]
+#[cfg_attr(all(unix, feature = "x"), cfg_attr(test, allow(clippy::x)))] // expect: allow
+struct S;
+let allow = [x[0], y];
+"""
+
 DEAD = """
 #![allow(unused_imports)] // expect: dead-code
 #[allow(dead_code)] // expect: dead-code
 fn a() {}
 #[expect(dead_code, reason = "later")] // expect: dead-code
 fn b() {}
-#[cfg_attr(windows, allow(dead_code))]
+#[cfg_attr(windows, expect(dead_code, reason = "unix uses it"))]
 fn c() {}
 #[cfg_attr(not(test), allow(dead_code))] // expect: dead-code
 fn d() {}
-#[allow(clippy::too_many_arguments, reason = "the API")]
+#[expect(clippy::too_many_arguments, reason = "the API")]
 fn e() {}
 
 #[cfg(test)]
 mod tests {
-    #[allow(dead_code)]
+    #[expect(dead_code, reason = "a test")]
     fn t() {}
 }
 """
@@ -209,7 +239,7 @@ def found(text: str, path: str = "a.rs") -> list[tuple[int, str]]:
 
 class Rules(unittest.TestCase):
     def test_fixtures(self):
-        for text in (BLANK, DENSE, COMMENTS, UNWRAP, DEAD):
+        for text in (BLANK, DENSE, COMMENTS, UNWRAP, ALLOW, DEAD):
             self.assertEqual(found(text), expected(text))
 
     def test_warnings(self):

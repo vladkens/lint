@@ -13,9 +13,9 @@ Each linter is one Python file with the standard library only. [uv](https://docs
 
 A linter checks only what the language's own linter and formatter can't, on the lines a branch changes; uncommitted and untracked files count too.
 
-| Linter    | For                                                                               |
-| --------- | --------------------------------------------------------------------------------- |
-| `rust.py` | Rust: blank lines, long comments, unwraps, dead code, unused `pub`, module cycles |
+| Linter    | For                                                                                       |
+| --------- | ----------------------------------------------------------------------------------------- |
+| `rust.py` | Rust: blank lines, long comments, unwraps, allows, dead code, unused `pub`, module cycles |
 
 ## ⚡ Quick start
 
@@ -45,16 +45,17 @@ There it fetches the full history if the checkout is shallow, compares a pull re
 
 ## 🦀 rust.py
 
-| Rule           | Finds                                                                       |
-| -------------- | --------------------------------------------------------------------------- |
-| `blank-line`   | a statement right after an `if` / `for` / `match` block, with no blank line |
-| `dense-block`  | more than 12 statements in a row without a blank line                       |
-| `long-comment` | more than 3 comment lines in a row; a warning, shown once on your machine   |
-| `dead-code`    | `allow` / `expect` of `dead_code` or `unused_*`: delete unused code instead |
-| `unwrap`       | `.unwrap()` outside tests, examples and `build.rs`; a warning, shown once   |
-| `unused-pub`   | a new `pub` item that nothing else names, tests and doc examples included   |
-| `cycle`        | a new `use` that makes two top modules of a crate use each other; a warning |
-| `new-use`      | a note: a top module uses another for the first time                        |
+| Rule           | Finds                                                                         |
+| -------------- | ----------------------------------------------------------------------------- |
+| `blank-line`   | a statement right after an `if` / `for` / `match` block, with no blank line   |
+| `dense-block`  | more than 12 statements in a row without a blank line                         |
+| `long-comment` | more than 3 comment lines in a row; a warning, shown once on your machine     |
+| `dead-code`    | `allow` / `expect` of `dead_code` or `unused_*`: delete unused code instead   |
+| `allow`        | `#[allow]`, or `#[expect]` without a `reason`: `expect(lint, reason = "why")` |
+| `unwrap`       | `.unwrap()` outside tests, examples and `build.rs`; a warning, shown once     |
+| `unused-pub`   | a new `pub` item that nothing else names, tests and doc examples included     |
+| `cycle`        | a new `use` that makes two top modules of a crate use each other; a warning   |
+| `new-use`      | a note: a top module uses another for the first time                          |
 
 Errors fail the check. A warning lets a comment, an unwrap or a cycle stay when it's needed. A field kept for its `Drop` or an FFI layout takes a name that starts with `_`.
 

@@ -21,6 +21,7 @@ branch that leaves the uncommitted changes; CI on the default branch checks its 
                 (warning: locally each one is shown once, in CI always)
   dead-code     an allow or expect of dead_code or unused_*, unless a platform or feature has the
                 code (error)
+  allow         an allow attribute, or an expect without a reason (error)
   unused-pub    a new pub item that nothing else in the repository names, tests and doc examples
                 included; in check only in libraries: in a binary the compiler reports it (error)
   unwrap        an unwrap outside tests, examples and build scripts (warning, as long-comment)
@@ -68,6 +69,10 @@ FN = re.compile(r"\bfn\s+(\w+)")
 MOD = re.compile(r"\bmod\s+(\w+)$")
 TEST = re.compile(r"#\[(?:cfg\((?:all\(|any\()?test\b|(?:\w+::)*test\b)")
 TEST_DIRS = {"tests", "benches", "examples"}
+ATTR = re.compile(r"#!?\[")
+LINT_ATTR = re.compile(r"\s*(allow|expect|cfg_attr)\s*\(")
+BRACKETS = {"[": 1, "(": 1, "{": 1, "]": -1, ")": -1, "}": -1}
+REASON = re.compile(r"\breason\s*=")
 UNWRAP = re.compile(r"\.\s*unwrap\s*\(\s*\)")
 DEAD = re.compile(r"#!?\[.*\b(?:allow|expect)\s*\(.*\b(?:dead_code|unused\w*)\b")
 PUB = re.compile(
@@ -285,6 +290,56 @@ def long_comments(sc: Scan) -> list[tuple[int, int, int]]:
     return out
 
 
+def closing(text: str, i: int) -> int:
+    """The end of the bracket group that opens at i, or of the text."""
+    depth = 0
+    for j in range(i, len(text)):
+        depth += BRACKETS.get(text[j], 0)
+        if not depth:
+            return j + 1
+
+    return len(text)
+
+
+def items(text: str) -> list[str]:
+    """A list's items: split at its commas, not those in brackets."""
+    out, depth, start = [], 0, 0
+    for j, c in enumerate(text):
+        depth += BRACKETS.get(c, 0)
+        if c == "," and not depth:
+            out.append(text[start:j])
+            start = j + 1
+
+    return out + [text[start:]]
+
+
+def lint_args(attr: str) -> list[tuple[str, str]]:
+    """The allows and expects of an attribute's content, those of a cfg_attr included: which one,
+    and its arguments."""
+    m = LINT_ATTR.match(attr)
+    if not m:
+        return []
+
+    args = attr[m.end() : closing(attr, m.end() - 1) - 1]
+    if m[1] != "cfg_attr":
+        return [(m[1], args)]
+
+    return [x for item in items(args)[1:] for x in lint_args(item)]
+
+
+def lint_attrs(sc: Scan) -> list[tuple[int, int, str, str]]:
+    """Each allow and expect of an attribute, plain or in a cfg_attr: the attribute's first and last
+    line index, allow or expect, and its arguments."""
+    text, out = "\n".join(sc.codes), []
+    for m in ATTR.finditer(text):
+        end = closing(text, m.end() - 1)
+        a = text.count("\n", 0, m.start())
+        b = a + text.count("\n", m.start(), end)
+        out += [(a, b, kind, args) for kind, args in lint_args(text[m.end() : end - 1])]
+
+    return out
+
+
 def testing(path: str) -> bool:
     """Whether the whole file is tests, examples, benchmarks or a build script."""
     parts = Path(path).parts
@@ -321,18 +376,31 @@ def hits(path: str, sc: Scan, lines: set[int] | None) -> list[Hit]:
         msg = f"{n} comment lines; say only what the code can't, or keep it if it's needed"
         out.append(Hit(path, a + 1, "long-comment", msg, "warning", key))
 
-    if testing(path):
-        return out
-
+    dead = {
+        i
+        for i, code in enumerate(sc.codes)
+        if not testing(path) and not sc.test[i] and DEAD.search(code) and not PLATFORM.search(code)
+    }
     msg = (
         "the compiler is told not to report unused code: delete it or use it; a field kept for its "
         "Drop or an FFI layout takes a name that starts with `_`"
     )
-    out += [
-        Hit(path, i + 1, "dead-code", msg)
-        for i, code in enumerate(sc.codes)
-        if not sc.test[i] and near(i, i) and DEAD.search(code) and not PLATFORM.search(code)
-    ]
+    out += [Hit(path, i + 1, "dead-code", msg) for i in sorted(dead) if near(i, i)]
+    for a, b, kind, args in lint_attrs(sc):
+        if a in dead or not near(a, b):
+            continue
+
+        if kind == "allow":
+            msg = 'an allow stays when the lint is gone: `expect(lint, reason = "why")` says so'
+        elif not REASON.search(args):
+            msg = 'an expect says why: `expect(lint, reason = "why")`'
+        else:
+            continue
+
+        out.append(Hit(path, a + 1, "allow", msg))
+
+    if testing(path):
+        return out
 
     msg = 'an unwrap panics without saying why: `?` if the function can fail, else `expect("why")`'
     for i, code in enumerate(sc.codes):
