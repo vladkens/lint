@@ -7,6 +7,7 @@ Each fact has one source: what a linter checks and its commands are its docstrin
 ## Scope
 
 - One file per language, `<lang>.py`: Python 3.11 with the standard library only, working the same on macOS, Linux and Windows.
+- A linter checks only what the language's own linter and formatter can't, and never runs them: the project's `Makefile` does.
 - Projects run `https://raw.githubusercontent.com/vladkens/lint/main/<lang>.py`: whatever lands on main reaches every project's next `make check`, CI run and agent hook at once.
 - So a new rule counts only on the lines a branch changes, and nothing that passes today fails tomorrow on old lines.
 - The commands, flags, output and hook protocol change only with the person's approval: Makefiles and CI depend on them.

@@ -2,12 +2,13 @@
 # /// script
 # requires-python = ">=3.11"
 # ///
-"""rust-lint: style and safety checks for Rust repositories, on the lines a branch changes.
+"""rust-lint: the checks of Rust repositories that clippy and rustfmt don't have, on the lines a
+branch changes.
 
-  rust-lint [--all] [--base REF] [--no-clippy] [-- CARGO_ARGS…]  check
-  rust-lint fix [--all] [--base REF]                              add the missing blank lines
-  rust-lint modules                                               what each top module uses
-  rust-lint hook                                                  Stop hook of Claude Code, Codex
+  rust-lint [--all] [--base REF]      check
+  rust-lint fix [--all] [--base REF]  add the missing blank lines
+  rust-lint modules                   what each top module uses
+  rust-lint hook                      Stop hook of Claude Code, Codex
 
 Only the changed lines count, unless `--all`: the ones that differ from the merge base with the
 default branch (origin/main or main), uncommitted and untracked files included. On the default
@@ -16,29 +17,25 @@ branch that leaves the uncommitted changes; CI on the default branch checks its 
   blank-line    a statement after an if / for / while / loop / match block starts after a blank
                 line (error; `fix` adds it)
   dense-block   more than DENSE statements in a row in a function, without a blank line (error)
-  long-comment  more than COMMENT comment lines in a row, `//!` aside (warning: locally each one is
-                shown once, in CI always)
-  long-fn       a function of more than LONG lines of code that the change touches, unless it was
-                that long at the base and didn't grow (error)
+  long-comment  more than COMMENT comment lines in a row, `//!`, empty lines and doc examples aside
+                (warning: locally each one is shown once, in CI always)
   dead-code     an allow or expect of dead_code or unused_*, unless a platform or feature has the
                 code (error)
+  allow         an allow attribute, or an expect without a reason (error)
   unused-pub    a new pub item that nothing else in the repository names, tests and doc examples
-                included; where clippy runs, only in libraries: the compiler finds it in binaries
-                (error)
+                included; in check only in libraries: in a binary the compiler reports it (error)
+  unwrap        an unwrap outside tests, examples and build scripts (warning, as long-comment)
   cycle         a new use between the top modules of a crate that closes a cycle; with --all every
                 cycle (warning, as long-comment)
   new-use       the first use of a top module by another (note)
-  clippy        `cargo clippy --all-targets CARGO_ARGS`: any warning fails, as with -D warnings,
-                and the STRICT lints only count on changed lines outside tests: a function's
-                cognitive_complexity counts where it's new
-  quick         `.unwrap()`, `dbg!`, `todo!` and `unimplemented!` outside tests, found in the text
-                where clippy doesn't run: with --no-clippy and in the hook (error)
+
+Clippy runs on its own, from the project's Makefile, with its default lints.
 
 rust-lint is `uv run --script https://raw.githubusercontent.com/vladkens/lint/main/rust.py`, the
 LINT of a project's Makefile. The hook reads the agent's Stop event on stdin and works in
-repositories whose Makefile runs it (mentions vladkens/lint/). It runs the text and quick rules,
-and on an error or a warning it hasn't shown it asks the agent to go on; with stop_hook_active it
-lets the agent stop. It fails open.
+repositories whose Makefile runs it (mentions vladkens/lint/). It runs the rules, a binary's
+unused pub items included, and on an error or a warning it hasn't shown it asks the agent to go
+on; with stop_hook_active it lets the agent stop. It fails open.
 """
 
 import argparse
@@ -58,26 +55,6 @@ from pathlib import Path
 
 DENSE = 12
 COMMENT = 3
-LONG = 100
-# Panics nobody wrote on purpose, debugging leftovers, lint suppressions without a reason and
-# functions too tangled to follow.
-STRICT = (
-    "unwrap_used",
-    "string_slice",
-    "unchecked_time_subtraction",
-    "todo",
-    "unimplemented",
-    "dbg_macro",
-    "allow_attributes",
-    "allow_attributes_without_reason",
-    "cognitive_complexity",
-)
-# Text stand-ins for the STRICT lints a slip leaves, for where clippy doesn't run.
-QUICK = {
-    "unwrap_used": (r"\.unwrap\(\)", '`.unwrap()` panics: handle the error, or `expect("why")`'),
-    "dbg_macro": (r"\bdbg!", "a `dbg!` left in"),
-    "todo": (r"\b(?:todo|unimplemented)!", "unfinished code"),
-}
 HOOK_LIMIT = 10
 # In a project's Makefile: the hook works there.
 OPT_IN = "vladkens/lint/"
@@ -92,6 +69,11 @@ FN = re.compile(r"\bfn\s+(\w+)")
 MOD = re.compile(r"\bmod\s+(\w+)$")
 TEST = re.compile(r"#\[(?:cfg\((?:all\(|any\()?test\b|(?:\w+::)*test\b)")
 TEST_DIRS = {"tests", "benches", "examples"}
+ATTR = re.compile(r"#!?\[")
+LINT_ATTR = re.compile(r"\s*(allow|expect|cfg_attr)\s*\(")
+BRACKETS = {"[": 1, "(": 1, "{": 1, "]": -1, ")": -1, "}": -1}
+REASON = re.compile(r"\breason\s*=")
+UNWRAP = re.compile(r"\.\s*unwrap\s*\(\s*\)|\b(?:Option|Result)\s*::\s*unwrap\b")
 DEAD = re.compile(r"#!?\[.*\b(?:allow|expect)\s*\(.*\b(?:dead_code|unused\w*)\b")
 PUB = re.compile(
     r"^\s*pub\s+(?:(?:const|async|unsafe|extern\s*(?:\"\")?)\s+)*"
@@ -135,15 +117,6 @@ class Hit:
 
 
 @dataclass
-class Fn:
-    name: str
-    line: int  # where `fn` is
-    end: int  # the closing brace
-    size: int  # lines with code in the body
-    test: bool
-
-
-@dataclass
 class Frame:
     fn: tuple[str, int] | None
     test: bool
@@ -160,7 +133,6 @@ class Scan:
     body: list[bool]  # the line starts inside a function body
     test: list[bool]
     mods: list[tuple[str, ...]]  # the inline modules the line is in
-    fns: list[Fn]
 
 
 # MARK: Rules
@@ -214,10 +186,10 @@ def strip(text: str) -> tuple[list[str], set[int]]:
     return "".join(out).split("\n"), noted
 
 
-def blocks(codes: list[str]) -> tuple[list[bool], list[bool], list[tuple[str, ...]], list[Fn]]:
+def blocks(codes: list[str]) -> tuple[list[bool], list[bool], list[tuple[str, ...]]]:
     """Per line: whether it starts in a function body outside macros, whether it's test code and
-    the inline modules it's in; and the functions."""
-    body, test, mods, fns, stack = [], [], [], [], []
+    the inline modules it's in."""
+    body, test, mods, stack = [], [], [], []
     fn, tst = None, False
     for n, code in enumerate(codes):
         s = code.strip()
@@ -235,18 +207,14 @@ def blocks(codes: list[str]) -> tuple[list[bool], list[bool], list[tuple[str, ..
                 stack.append(Frame(fn, tst, head.endswith("!"), mod and mod[1], n))
                 fn, tst = None, False
             elif c == "}" and stack:
-                f = stack.pop()
-                if f.fn:
-                    size = sum(1 for x in codes[f.line + 1 : n] if x.strip())
-                    inside = f.test or any(x.test for x in stack)
-                    fns.append(Fn(f.fn[0], f.fn[1], n, size, inside))
+                stack.pop()
 
         if s.endswith(";"):
             fn, tst = None, False
 
         test.append(was or tst or any(f.test for f in stack))
 
-    return body, test, mods, fns
+    return body, test, mods
 
 
 def scan(text: str) -> Scan:
@@ -301,21 +269,81 @@ def dense_blocks(sc: Scan) -> list[tuple[int, int, int]]:
     return out
 
 
-def long_comments(sc: Scan) -> list[tuple[int, int]]:
-    """Runs of more than COMMENT comment lines: first and last index."""
-    out, start = [], None
+def long_comments(sc: Scan) -> list[tuple[int, int, int]]:
+    """Runs of more than COMMENT lines of comment text: first and last index, and the count. Empty
+    comment lines and a doc comment's code examples don't count."""
+    out, start, n, fenced = [], None, 0, False
     for i, (raw, code) in enumerate(zip(sc.raws + [""], sc.codes + [""])):
         text = raw.strip()
         if i in sc.noted and text and not code.strip() and not text.startswith(("//!", "// MARK")):
             start = i if start is None else start
+            body = text.lstrip("/").strip()
+            fenced ^= body.startswith("```")
+            n += bool(body) and not fenced and not body.startswith("```")
             continue
 
-        if start is not None and i - start > COMMENT:
-            out.append((start, i - 1))
+        if start is not None and n > COMMENT:
+            out.append((start, i - 1, n))
 
-        start = None
+        start, n, fenced = None, 0, False
 
     return out
+
+
+def closing(text: str, i: int) -> int:
+    """The end of the bracket group that opens at i, or of the text."""
+    depth = 0
+    for j in range(i, len(text)):
+        depth += BRACKETS.get(text[j], 0)
+        if not depth:
+            return j + 1
+
+    return len(text)
+
+
+def items(text: str) -> list[str]:
+    """A list's items: split at its commas, not those in brackets."""
+    out, depth, start = [], 0, 0
+    for j, c in enumerate(text):
+        depth += BRACKETS.get(c, 0)
+        if c == "," and not depth:
+            out.append(text[start:j])
+            start = j + 1
+
+    return out + [text[start:]]
+
+
+def lint_args(attr: str) -> list[tuple[str, str]]:
+    """The allows and expects of an attribute's content, those of a cfg_attr included: which one,
+    and its arguments."""
+    m = LINT_ATTR.match(attr)
+    if not m:
+        return []
+
+    args = attr[m.end() : closing(attr, m.end() - 1) - 1]
+    if m[1] != "cfg_attr":
+        return [(m[1], args)]
+
+    return [x for item in items(args)[1:] for x in lint_args(item)]
+
+
+def lint_attrs(sc: Scan) -> list[tuple[int, int, str, str]]:
+    """Each allow and expect of an attribute, plain or in a cfg_attr: the attribute's first and last
+    line index, allow or expect, and its arguments."""
+    text, out = "\n".join(sc.codes), []
+    for m in ATTR.finditer(text):
+        end = closing(text, m.end() - 1)
+        a = text.count("\n", 0, m.start())
+        b = a + text.count("\n", m.start(), end)
+        out += [(a, b, kind, args) for kind, args in lint_args(text[m.end() : end - 1])]
+
+    return out
+
+
+def testing(path: str) -> bool:
+    """Whether the whole file is tests, examples, benchmarks or a build script."""
+    parts = Path(path).parts
+    return bool(TEST_DIRS & set(parts[:-1])) or parts[-1] in ("build.rs", "tests.rs")
 
 
 def touches(lines: set[int] | None, a: int, b: int) -> bool:
@@ -323,7 +351,7 @@ def touches(lines: set[int] | None, a: int, b: int) -> bool:
     return lines is None or not lines.isdisjoint(range(a + 1, b + 2))
 
 
-def hits(path: str, sc: Scan, lines: set[int] | None, quick: bool = False) -> list[Hit]:
+def hits(path: str, sc: Scan, lines: set[int] | None) -> list[Hit]:
     """What the text rules find in a file, limited to the changed lines (None: all of them)."""
 
     def near(a: int, b: int) -> bool:
@@ -339,60 +367,53 @@ def hits(path: str, sc: Scan, lines: set[int] | None, quick: bool = False) -> li
         for a, b, n in dense_blocks(sc)
         if near(a, b)
     ]
-    for a, b in long_comments(sc):
+    for a, b, n in long_comments(sc):
         if not near(a, b):
             continue
 
         text = "\n".join(x.strip() for x in sc.raws[a : b + 1])
         key = hashlib.sha1(f"{path}\n{text}".encode()).hexdigest()[:16]
-        msg = f"{b - a + 1} comment lines; say only what the code can't, or keep it if it's needed"
+        msg = f"{n} comment lines; say only what the code can't, or keep it if it's needed"
         out.append(Hit(path, a + 1, "long-comment", msg, "warning", key))
 
-    if testing(path):
-        return out
-
+    dead = {
+        i
+        for i, code in enumerate(sc.codes)
+        if not testing(path) and not sc.test[i] and DEAD.search(code) and not PLATFORM.search(code)
+    }
     msg = (
         "the compiler is told not to report unused code: delete it or use it; a field kept for its "
         "Drop or an FFI layout takes a name that starts with `_`"
     )
-    out += [
-        Hit(path, i + 1, "dead-code", msg)
-        for i, code in enumerate(sc.codes)
-        if not sc.test[i] and near(i, i) and DEAD.search(code) and not PLATFORM.search(code)
-    ]
-    if quick:
-        out += [
-            Hit(path, i + 1, rule, msg)
-            for i, code in enumerate(sc.codes)
-            for rule, (rx, msg) in QUICK.items()
-            if not sc.test[i] and near(i, i) and re.search(rx, code)
-        ]
+    out += [Hit(path, i + 1, "dead-code", msg) for i in sorted(dead) if near(i, i)]
+    for a, b, kind, args in lint_attrs(sc):
+        if a in dead or not near(a, b):
+            continue
+
+        if kind == "allow":
+            msg = 'an allow stays when the lint is gone: `expect(lint, reason = "why")` says so'
+        elif not REASON.search(args):
+            msg = 'an expect says why: `expect(lint, reason = "why")`'
+        else:
+            continue
+
+        out.append(Hit(path, a + 1, "allow", msg))
+
+    if testing(path):
+        return out
+
+    msg = 'an unwrap panics without saying why: `?` if the function can fail, else `expect("why")`'
+    for i, code in enumerate(sc.codes):
+        if sc.test[i] or not near(i, i) or not UNWRAP.search(code):
+            continue
+
+        key = hashlib.sha1(f"{path}\n{sc.raws[i].strip()}".encode()).hexdigest()[:16]
+        out.append(Hit(path, i + 1, "unwrap", msg, "warning", key))
 
     return out
 
 
-# MARK: Functions, dead code, modules
-
-
-def long_fns(
-    top: Path, since: str | None, path: str, sc: Scan, lines: set[int] | None
-) -> list[Hit]:
-    """Functions over LONG lines that the change touches, unless they were that long at the base
-    and didn't grow."""
-    found = [f for f in sc.fns if f.size > LONG and not f.test and touches(lines, f.line, f.end)]
-    if not found or testing(path):
-        return []
-
-    old = git(top, "show", f"{since}:{path}") if since and lines is not None else None
-    before = collections.defaultdict(int)
-    for f in scan(old).fns if old else []:
-        before[f.name] = max(before[f.name], f.size)
-
-    return [
-        Hit(path, f.line + 1, "long-fn", f"`{f.name}` has {f.size} lines of code; split it")
-        for f in found
-        if before[f.name] <= LONG or f.size > before[f.name]
-    ]
+# MARK: Unused pub items, modules
 
 
 def package(path: str) -> str | None:
@@ -404,13 +425,13 @@ def package(path: str) -> str | None:
     return "/".join(parts[: len(parts) - 1 - parts[::-1].index("src")])
 
 
-def unused_pubs(scans: "Scans", scope: dict | None, quick: bool) -> list[Hit]:
-    """New pub items whose name appears nowhere else. Where clippy runs, only in libraries: in a
-    binary the compiler reports them itself."""
+def unused_pubs(scans: "Scans", scope: dict | None, bins: bool) -> list[Hit]:
+    """New pub items whose name appears nowhere else; in binaries only with bins, as the compiler
+    reports them there."""
     libs = {package(x) for x in scans.names if x.endswith("src/lib.rs")}
     found = []
     for path in scans.names if scope is None else [x for x in scans.names if x in scope]:
-        if testing(path) or not (quick or package(path) in libs):
+        if testing(path) or not (bins or package(path) in libs):
             continue
 
         sc, lines = scans[path], None if scope is None else scope[path]
@@ -780,14 +801,13 @@ def snapshot(top: Path, rev: str, same: set[str]) -> dict[str, str | None]:
     return out
 
 
-def findings(top: Path, scope: dict | None, since: str | None, quick: bool = False) -> list[Hit]:
+def findings(top: Path, scope: dict | None, since: str | None, bins: bool = False) -> list[Hit]:
     scans, out = Scans(top), []
     for x in scans.names:
         if scope is None or x in scope:
-            lines = None if scope is None else scope[x]
-            out += hits(x, scans[x], lines, quick) + long_fns(top, since, x, scans[x], lines)
+            out += hits(x, scans[x], None if scope is None else scope[x])
 
-    return out + unused_pubs(scans, scope, quick) + tangles(top, since, scope, scans)
+    return out + unused_pubs(scans, scope, bins) + tangles(top, since, scope, scans)
 
 
 def unseen(top: Path, warns: list[Hit]) -> list[Hit]:
@@ -801,68 +821,7 @@ def unseen(top: Path, warns: list[Hit]) -> list[Hit]:
     return new
 
 
-# MARK: Clippy
-
-
-def clippy(top: Path, scope: dict | None, args: list[str]) -> int:
-    """Runs clippy and prints what fails; returns how many messages failed."""
-    i = args.index("--") if "--" in args else len(args)
-    fmt = "json-diagnostic-rendered-ansi" if sys.stdout.isatty() else "json"
-    strict = [f"-Wclippy::{x}" for x in STRICT]
-    cmd = ["cargo", "clippy", "--all-targets", f"--message-format={fmt}", *args[:i]]
-    rep = subprocess.run(
-        [*cmd, "--", *strict, *args[i + 1 :]],
-        stdout=subprocess.PIPE,
-        encoding="utf-8",
-        errors="replace",
-    )
-    failed = report(top, scope, rep.stdout)
-    # A build that failed without a diagnostic has said why on stderr.
-    return failed or int(rep.returncode != 0)
-
-
-def report(top: Path, scope: dict | None, out: str) -> int:
-    seen, scans, failed = set(), {}, 0
-    for line in out.splitlines():
-        msg = json.loads(line) if line.startswith("{") else {}
-        m = msg.get("message") if msg.get("reason") == "compiler-message" else None
-        if not m or m["level"] not in ("warning", "error") or not m["spans"]:
-            continue
-
-        span = next((x for x in m["spans"] if x["is_primary"]), m["spans"][0])
-        file = (Path.cwd() / span["file_name"]).resolve()
-        path = file.relative_to(top).as_posix() if file.is_relative_to(top) else str(file)
-        code = (m["code"] or {}).get("code") or ""
-        key = (code, path, span["line_start"], span["column_start"], m["message"])
-        if key in seen:
-            continue
-
-        seen.add(key)
-        if m["level"] == "warning" and code.removeprefix("clippy::") in STRICT:
-            if path not in scans and file.is_file():
-                scans[path] = scan(read(file)).test
-
-            a, b = span["line_start"], span["line_end"]
-            flags = scans.get(path, [])
-            lines = scope.get(path, set()) if scope is not None else None
-            if testing(path) or (a <= len(flags) and flags[a - 1]):
-                continue
-
-            if lines is not None and lines.isdisjoint(range(a, b + 1)):
-                continue
-
-        failed += 1
-        sys.stdout.write(m["rendered"])
-        if GITHUB:
-            annotate("error", path, span["line_start"], code or "rustc", m["message"])
-
-    return failed
-
-
-def testing(path: str) -> bool:
-    """Whether the whole file is tests, examples, benchmarks or a build script."""
-    parts = Path(path).parts
-    return bool(TEST_DIRS & set(parts[:-1])) or parts[-1] in ("build.rs", "tests.rs")
+# MARK: Commands
 
 
 def annotate(kind: str, path: str, line: int, title: str, msg: str):
@@ -873,11 +832,8 @@ def annotate(kind: str, path: str, line: int, title: str, msg: str):
     print(f"::{kind} file={esc(path, True)},line={line},title={esc(title, True)}::{esc(msg)}")
 
 
-# MARK: Commands
-
-
-def check(top: Path, scope: dict | None, since: str | None, opts) -> int:
-    found = findings(top, scope, since, quick=opts.no_clippy)
+def check(top: Path, scope: dict | None, since: str | None) -> int:
+    found = findings(top, scope, since)
     errors = [x for x in found if x.kind == "error"]
     warns = [x for x in found if x.warn]
     notes = [x for x in found if x.kind == "note"]
@@ -887,7 +843,7 @@ def check(top: Path, scope: dict | None, since: str | None, opts) -> int:
         if GITHUB:
             annotate("notice" if h.kind == "note" else h.kind, h.path, h.line, h.rule, h.msg)
 
-    failed = len(errors) + (0 if opts.no_clippy else clippy(top, scope, opts.cargo))
+    failed = len(errors)
     where = f"the lines changed since {since[:7]}" if since else "all lines"
     said = [count(failed, "error")] if failed or not shown else []
     said += [count(len(shown), "warning")] if shown else []
@@ -956,7 +912,7 @@ def hook() -> int:
         if not since:
             return 0
 
-        found = findings(top, changed(top, since), since, quick=True)
+        found = findings(top, changed(top, since), since, bins=True)
         errors = [x for x in found if x.kind == "error"]
         new = unseen(top, [x for x in found if x.warn])
         if not errors and not new:
@@ -974,7 +930,7 @@ def hook() -> int:
         if new:
             why.append(
                 "A warning comes up once: shorten a long comment to what the reader needs, "
-                "untangle a cycle, or leave it if it's needed."
+                "replace an unwrap, untangle a cycle, or leave it if it's needed."
             )
 
         print(json.dumps({"decision": "block", "reason": "\n".join(why)}))
@@ -985,17 +941,14 @@ def hook() -> int:
 
 
 def main() -> int:
-    argv = sys.argv[1:]
-    i = argv.index("--") if "--" in argv else len(argv)
     cli = argparse.ArgumentParser(
         prog="rust-lint", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    cli.add_argument("cmd", nargs="?", choices=("check", "fix", "modules", "hook"), default="check")
+    cmds = ("check", "fix", "modules", "hook")
+    cli.add_argument("cmd", nargs="?", choices=cmds, default="check")
     cli.add_argument("--all", action="store_true", help="every line counts, not only changed ones")
     cli.add_argument("--base", help="count the changes from this commit")
-    cli.add_argument("--no-clippy", action="store_true", help="only the text rules")
-    opts = cli.parse_args(argv[:i])
-    opts.cargo = argv[i + 1 :]
+    opts = cli.parse_args()
     if opts.cmd == "hook":
         return hook()
 
@@ -1009,7 +962,7 @@ def main() -> int:
 
     since = None if opts.all else base(top, opts.base)
     scope = changed(top, since) if since else None
-    return fix(top, scope) if opts.cmd == "fix" else check(top, scope, since, opts)
+    return fix(top, scope) if opts.cmd == "fix" else check(top, scope, since)
 
 
 if __name__ == "__main__":

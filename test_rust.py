@@ -4,7 +4,7 @@
 # ///
 
 """Tests for rust.py: the rules on fixtures marked with `// expect: <rule>`, and the changed
-lines, fix, clippy filtering and the Stop hook in a scratch git repository."""
+lines, fix and the Stop hook in a scratch git repository."""
 
 import io
 import json
@@ -143,25 +143,67 @@ fn d() {}
    counts
    too. */
 fn e() {}
+
+/// Empty lines and examples
+///
+/// don't count:
+///
+/// ```
+/// let a = 1;
+/// let b = 2;
+/// ```
+fn f() {}
 """
 
-PANICS = """
-fn a(x: Option<u8>) -> u8 {
-    let s = "x.unwrap()";
-    dbg!(x); // expect: dbg_macro
-    x.unwrap_or(0);
-    x.unwrap() // expect: unwrap_used
+UNWRAP = """
+fn a() -> u8 {
+    let x = "1".parse::<u8>().unwrap(); // expect: unwrap
+    let y = "2".parse::<u8>().ok().unwrap_or(0);
+    let z = "3".parse::<u8>().expect("a digit");
+    // .unwrap() in a comment
+    let s = ".unwrap()";
+    let v: Vec<u8> = [Some(1)].into_iter().map(Option::unwrap).collect(); // expect: unwrap
+    x + y + z
 }
 
 #[cfg(test)]
 mod tests {
-    fn t(x: Option<u8>) {
-        x.unwrap();
-        todo!();
+    #[test]
+    fn t() {
+        "1".parse::<u8>().unwrap();
     }
 }
 """
 
+ALLOW = """
+#![allow(clippy::too_many_arguments)] // expect: allow
+#[expect(clippy::too_many_arguments)] // expect: allow
+fn a() {}
+#[expect(clippy::too_many_arguments, reason = "the API")]
+fn b() {}
+#[cfg_attr(windows, allow(clippy::cast_possible_truncation))] // expect: allow
+fn c() {}
+#[expect( // expect: allow
+    clippy::too_many_arguments,
+    clippy::type_complexity,
+)]
+fn d() {}
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the API",
+)]
+fn e() {}
+#[allow(dead_code)] // expect: dead-code
+fn f() {}
+#[cfg_attr(unix, expect(clippy::type_complexity), expect(clippy::x, reason = "y"))] // expect: allow
+fn g() {}
+#[derive(Debug)]
+#[serde(rename = "allow(x)")]
+#[case(Some(1).expect("one"))]
+#[cfg_attr(all(unix, feature = "x"), cfg_attr(test, allow(clippy::x)))] // expect: allow
+struct S;
+let allow = [x[0], y];
+"""
 
 DEAD = """
 #![allow(unused_imports)] // expect: dead-code
@@ -169,16 +211,16 @@ DEAD = """
 fn a() {}
 #[expect(dead_code, reason = "later")] // expect: dead-code
 fn b() {}
-#[cfg_attr(windows, allow(dead_code))]
+#[cfg_attr(windows, expect(dead_code, reason = "unix uses it"))]
 fn c() {}
 #[cfg_attr(not(test), allow(dead_code))] // expect: dead-code
 fn d() {}
-#[allow(clippy::too_many_arguments, reason = "the API")]
+#[expect(clippy::too_many_arguments, reason = "the API")]
 fn e() {}
 
 #[cfg(test)]
 mod tests {
-    #[allow(dead_code)]
+    #[expect(dead_code, reason = "a test")]
     fn t() {}
 }
 """
@@ -192,22 +234,22 @@ def expected(text: str) -> list[tuple[int, str]]:
     ]
 
 
-def found(text: str, quick: bool = False, path: str = "a.rs") -> list[tuple[int, str]]:
-    return sorted((x.line, x.rule) for x in rl.hits(path, rl.scan(text), None, quick))
+def found(text: str, path: str = "a.rs") -> list[tuple[int, str]]:
+    return sorted((x.line, x.rule) for x in rl.hits(path, rl.scan(text), None))
 
 
 class Rules(unittest.TestCase):
     def test_fixtures(self):
-        for text in (BLANK, DENSE, COMMENTS, DEAD):
+        for text in (BLANK, DENSE, COMMENTS, UNWRAP, ALLOW, DEAD):
             self.assertEqual(found(text), expected(text))
 
-    def test_quick(self):
-        self.assertEqual(found(PANICS, quick=True), expected(PANICS))
-        self.assertEqual(found(PANICS), [])
-        self.assertEqual(found(PANICS, quick=True, path="tests/a.rs"), [])
+    def test_warnings(self):
+        for text in (COMMENTS, UNWRAP):
+            self.assertTrue(all(x.warn for x in rl.hits("a.rs", rl.scan(text), None)))
 
-    def test_long_comment_is_a_warning(self):
-        self.assertTrue(all(x.warn for x in rl.hits("a.rs", rl.scan(COMMENTS), None)))
+    def test_unwrap_in_tests(self):
+        for path in ("tests/a.rs", "examples/a.rs", "build.rs"):
+            self.assertEqual(found(UNWRAP, path), [])
 
     def test_strip(self):
         cases = {
@@ -245,18 +287,6 @@ class Rules(unittest.TestCase):
         self.assertEqual(
             [i + 1 for i, x in enumerate(flags) if x], [3, 4, 5, 6, 7, 9, 10, 11, 12, 13, 14]
         )
-
-    def test_long_fn(self):
-        def fn(name: str, n: int, attr: str = "") -> str:
-            return f"{attr}fn {name}() {{\n" + "    x();\n\n" * n + "}\n"
-
-        text = fn("short", 100) + fn("long", 101) + fn("t", 120, "#[test]\n")
-        hits = rl.long_fns(Path("."), None, "a.rs", rl.scan(text), None)
-        self.assertEqual(
-            [str(x) for x in hits],
-            ["a.rs:203: error[long-fn]: `long` has 101 lines of code; split it"],
-        )
-        self.assertEqual(rl.long_fns(Path("."), None, "tests/a.rs", rl.scan(text), None), [])
 
     def test_unused_pub(self):
         texts = {
@@ -296,8 +326,8 @@ class Rules(unittest.TestCase):
         }
         scans = rl.Scans(Path("."), texts)
 
-        def names(quick: bool, scope: dict | None = None) -> list[str]:
-            return [x.msg.split("`")[1] for x in rl.unused_pubs(scans, scope, quick)]
+        def names(bins: bool, scope: dict | None = None) -> list[str]:
+            return [x.msg.split("`")[1] for x in rl.unused_pubs(scans, scope, bins)]
 
         self.assertEqual(names(False), ["unused"])
         self.assertEqual(names(True), ["lonely", "unused"])
@@ -470,23 +500,6 @@ class Repo(unittest.TestCase):
         self.git("commit", "-qm", "base")
         return self.git("rev-parse", "HEAD")
 
-    def test_long_fn_ratchet(self):
-        def fn(name: str, n: int) -> str:
-            return f"fn {name}() {{\n" + "    x();\n\n" * n + "}\n"
-
-        since = self.commit({"src/a.rs": fn("old", 105)})
-
-        def rules() -> list[str]:
-            hits = rl.findings(self.top, self.scope(since), since)
-            return [f"{x.line} {x.msg}" for x in hits if x.rule == "long-fn"]
-
-        self.write("src/a.rs", fn("old", 105).replace("x();", "y();", 1))
-        self.assertEqual(rules(), [])
-        self.write("src/a.rs", fn("old", 106))
-        self.assertEqual(rules(), ["1 `old` has 106 lines of code; split it"])
-        self.write("src/a.rs", fn("old", 105) + fn("new", 101))
-        self.assertEqual(rules(), ["213 `new` has 101 lines of code; split it"])
-
     def test_tangles(self):
         since = self.commit(
             {
@@ -518,7 +531,7 @@ class Repo(unittest.TestCase):
         self.assertEqual(rl.findings(self.top, self.scope(since), since), [])
 
     def check(self, *args: str) -> tuple[int, str]:
-        argv = ["rust-lint", *args, "--no-clippy"]
+        argv = ["rust-lint", *args]
         with (
             mock.patch("sys.argv", argv),
             mock.patch("pathlib.Path.cwd", return_value=self.top),
@@ -559,10 +572,10 @@ class Repo(unittest.TestCase):
     def test_hook(self):
         self.assertEqual(self.hook(), {})
         self.write("src/b.rs", NEW + LONG)
-        self.write("src/c.rs", "fn c(x: Option<u8>) -> u8 {\n    x.unwrap()\n}\n")
+        self.write("src/c.rs", "#[allow(dead_code)]\nfn c() {}\n")
         rep = self.hook()
         self.assertEqual(rep["decision"], "block")
-        self.assertIn("src/c.rs:2: error[unwrap_used]", rep["reason"])
+        self.assertIn("src/c.rs:1: error[dead-code]", rep["reason"])
         self.assertIn("src/b.rs:5: error[blank-line]", rep["reason"])
         self.assertIn("src/b.rs:8: warning[long-comment]", rep["reason"])
         self.assertEqual(self.hook(stop_hook_active=True), {})
@@ -575,35 +588,6 @@ class Repo(unittest.TestCase):
     def test_hook_fails_open(self):
         with mock.patch("sys.stdin", io.StringIO("not json")):
             self.assertEqual(rl.hook(), 0)
-
-    def test_clippy_report(self):
-        self.write("src/a.rs", OLD + "\n" + NEW + TESTS)
-        self.write("tests/t.rs", "fn t() {\n    x.unwrap();\n}\n")
-
-        def msg(code: str, path: str, line: int) -> str:
-            span = {"is_primary": True, "file_name": str(self.top / path), "column_start": 1}
-            span |= {"line_start": line, "line_end": line}
-            m = {"level": "warning", "code": {"code": code}, "message": code, "spans": [span]}
-            m["rendered"] = f"{code} {path}:{line}\n"
-            return json.dumps({"reason": "compiler-message", "message": m})
-
-        out = [
-            msg("clippy::unwrap_used", "src/a.rs", 3),  # an unchanged line
-            msg("clippy::unwrap_used", "src/a.rs", 9),
-            msg("clippy::unwrap_used", "src/a.rs", 9),  # the same message from the test target
-            msg("clippy::unwrap_used", "src/a.rs", 17),  # in mod tests
-            msg("clippy::unwrap_used", "tests/t.rs", 2),
-            msg("clippy::needless_return", "src/a.rs", 3),  # not strict: counts anywhere
-            '{"reason": "build-finished", "success": false}',
-        ]
-        with redirect_stdout(io.StringIO()) as printed:
-            failed = rl.report(self.top, self.scope(), "\n".join(out))
-
-        self.assertEqual(failed, 2)
-        rendered = "clippy::unwrap_used src/a.rs:9\nclippy::needless_return src/a.rs:3\n"
-        self.assertEqual(printed.getvalue(), rendered)
-        with redirect_stdout(io.StringIO()):
-            self.assertEqual(rl.report(self.top, None, "\n".join(out)), 3)
 
 
 if __name__ == "__main__":
