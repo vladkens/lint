@@ -11,7 +11,7 @@
 
 Each linter is one Python file with the standard library only. [uv](https://docs.astral.sh/uv/) runs it straight from its GitHub URL, so a project installs and copies nothing, on macOS, Linux and Windows alike.
 
-A linter checks what the language's own linter and formatter can't, and keeps the set of their rules my projects take. It checks the lines a branch changes; uncommitted and untracked files count too.
+A linter checks only what the language's own linter and formatter can't, on the lines a branch changes; uncommitted and untracked files count too.
 
 | Linter    | For                                                                      |
 | --------- | ------------------------------------------------------------------------ |
@@ -32,12 +32,6 @@ check:
 	cargo fmt --check
 	cargo clippy --all-targets -- -D warnings
 	$(LINT)
-```
-
-Once, in the project, add the clippy lints to `Cargo.toml` and `clippy.toml`:
-
-```sh
-uv run --script https://raw.githubusercontent.com/vladkens/lint/main/rust.py lints
 ```
 
 In CI, add uv before `make check`:
@@ -63,23 +57,12 @@ There it fetches the full history if the checkout is shallow, compares a pull re
 
 Errors fail the check. A warning lets a comment or a cycle stay when it's needed. A field kept for its `Drop` or an FFI layout takes a name that starts with `_`.
 
-`lints` adds these clippy lints, keeping what the project already sets:
-
-| Lint                                                  | Against                                    |
-| ----------------------------------------------------- | ------------------------------------------ |
-| `unwrap_used`                                         | `.unwrap()` outside tests: `expect("why")` |
-| `string_slice`, `unchecked_time_subtraction`          | panics on a char boundary or a clock       |
-| `todo`, `unimplemented`, `dbg_macro`                  | unfinished code and debugging leftovers    |
-| `allow_attributes`, `allow_attributes_without_reason` | `#[allow]`: `#[expect(x, reason = "why")]` |
-| `too_many_lines`, `cognitive_complexity`              | functions over 100 lines or hard to follow |
-
-| Command           | Does                                                    |
-| ----------------- | ------------------------------------------------------- |
-| `$(LINT)`         | checks the lines the branch changes                     |
-| `$(LINT) --all`   | checks every line                                       |
-| `$(LINT) fix`     | adds the missing blank lines                            |
-| `$(LINT) modules` | prints what each top module uses, and the cycles        |
-| `$(LINT) lints`   | adds the clippy lints to `Cargo.toml` and `clippy.toml` |
+| Command           | Does                                             |
+| ----------------- | ------------------------------------------------ |
+| `$(LINT)`         | checks the lines the branch changes              |
+| `$(LINT) --all`   | checks every line                                |
+| `$(LINT) fix`     | adds the missing blank lines                     |
+| `$(LINT) modules` | prints what each top module uses, and the cycles |
 
 ## 🤖 Agent hook
 

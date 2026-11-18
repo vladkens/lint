@@ -4,7 +4,7 @@
 # ///
 
 """Tests for rust.py: the rules on fixtures marked with `// expect: <rule>`, and the changed
-lines, fix, lints and the Stop hook in a scratch git repository."""
+lines, fix and the Stop hook in a scratch git repository."""
 
 import io
 import json
@@ -533,54 +533,6 @@ class Repo(unittest.TestCase):
     def test_hook_fails_open(self):
         with mock.patch("sys.stdin", io.StringIO("not json")):
             self.assertEqual(rl.hook(), 0)
-
-    def test_lints(self):
-        with self.assertRaises(SystemExit):
-            self.check("lints")
-
-        rest = '[lints.clippy]\nfoo = "allow"\n\n[lints.rust]\nx = "deny"\n'
-        self.write("Cargo.toml", '[package]\nname = "a"\n\n' + rest)
-        said = "rust-lint: Cargo.toml takes 10 clippy lints; clippy.toml takes 1 setting\n"
-        self.assertEqual(self.check("lints"), (0, said))
-        cfg = rl.tomllib.loads((self.top / "Cargo.toml").read_text())
-        want = {"foo": "allow"} | dict.fromkeys(rl.LINTS, "warn")
-        self.assertEqual(cfg["lints"], {"clippy": want, "rust": {"x": "deny"}})
-        text = (self.top / "Cargo.toml").read_text()
-        self.assertIn('foo = "allow"\nunwrap_used = "warn"\n', text)
-        self.assertEqual((self.top / "clippy.toml").read_text(), "allow-unwrap-in-tests = true\n")
-        self.assertEqual(self.check("lints"), (0, "rust-lint: the project has the lints\n"))
-
-        for text in ('[lints]\nclippy.unwrap_used = "allow"\n', 'a = """\n[lints.clippy]\n"""\n'):
-            self.write("Cargo.toml", text)
-            with self.assertRaises(SystemExit) as e:
-                self.check("lints")
-
-            self.assertIn("by hand", str(e.exception))
-
-    def test_lints_workspace(self):
-        ws = '[workspace]\nmembers = ["crates/*", "crates/vendor/*"]\n'
-        ws += 'exclude = ["crates/skip", "crates/vendor"]\n'
-        self.write("Cargo.toml", ws)
-        self.write("crates/a/Cargo.toml", '[package]\nname = "a"\n')
-        self.write("crates/b/Cargo.toml", '[package]\nname = "b"\n\n[lints]\nworkspace = true\n')
-        self.write("crates/skip/Cargo.toml", '[package]\nname = "skip"\n')
-        self.write("crates/vendor/x/Cargo.toml", '[package]\nname = "x"\n')
-        self.write("crates/c/Cargo.toml", '[package]\nname = "c"\n\n[lints.rust]\nx = "deny"\n')
-        self.write("clippy.toml", "too-many-lines-threshold = 80\n\n[x]\n")
-        code, out = self.check("lints")
-        self.assertEqual(code, 0)
-        self.assertIn("crates/a/Cargo.toml takes the workspace's lints", out)
-        self.assertNotIn("crates/b", out)
-        cfg = rl.tomllib.loads((self.top / "Cargo.toml").read_text())
-        self.assertEqual(cfg["workspace"]["lints"]["clippy"], dict.fromkeys(rl.LINTS, "warn"))
-        a = rl.tomllib.loads((self.top / "crates/a/Cargo.toml").read_text())
-        self.assertEqual(a["lints"], {"workspace": True})
-        self.assertNotIn("lints", (self.top / "crates/skip/Cargo.toml").read_text())
-        self.assertNotIn("lints", (self.top / "crates/vendor/x/Cargo.toml").read_text())
-        c = rl.tomllib.loads((self.top / "crates/c/Cargo.toml").read_text())
-        self.assertEqual(c["lints"]["clippy"], dict.fromkeys(rl.LINTS, "warn"))
-        conf = "too-many-lines-threshold = 80\nallow-unwrap-in-tests = true\n\n[x]\n"
-        self.assertEqual((self.top / "clippy.toml").read_text(), conf)
 
 
 if __name__ == "__main__":

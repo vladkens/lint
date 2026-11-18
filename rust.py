@@ -3,12 +3,11 @@
 # requires-python = ">=3.11"
 # ///
 """rust-lint: the checks of Rust repositories that clippy and rustfmt don't have, on the lines a
-branch changes, and the clippy lints a project takes.
+branch changes.
 
   rust-lint [--all] [--base REF]      check
   rust-lint fix [--all] [--base REF]  add the missing blank lines
   rust-lint modules                   what each top module uses
-  rust-lint lints                     add the LINTS to Cargo.toml and the CLIPPY settings
   rust-lint hook                      Stop hook of Claude Code, Codex
 
 Only the changed lines count, unless `--all`: the ones that differ from the merge base with the
@@ -28,9 +27,7 @@ branch that leaves the uncommitted changes; CI on the default branch checks its 
                 cycle (warning, as long-comment)
   new-use       the first use of a top module by another (note)
 
-Clippy runs on its own, from the project's Makefile. `lints` adds the LINTS a project's Cargo.toml
-lacks, as warnings that `-D warnings` fails ([workspace.lints] in a workspace, whose members then
-take them), and the CLIPPY settings to clippy.toml; what the project sets stays.
+Clippy runs on its own, from the project's Makefile, with its default lints.
 
 rust-lint is `uv run --script https://raw.githubusercontent.com/vladkens/lint/main/rust.py`, the
 LINT of a project's Makefile. The hook reads the agent's Stop event on stdin and works in
@@ -50,29 +47,12 @@ import posixpath
 import re
 import subprocess
 import sys
-import tomllib
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
 DENSE = 12
 COMMENT = 3
-# The clippy lints a project takes: panics nobody wrote on purpose, debugging leftovers, lint
-# suppressions without a reason, functions too long (100 lines) or tangled to follow.
-LINTS = (
-    "unwrap_used",
-    "string_slice",
-    "unchecked_time_subtraction",
-    "todo",
-    "unimplemented",
-    "dbg_macro",
-    "allow_attributes",
-    "allow_attributes_without_reason",
-    "too_many_lines",
-    "cognitive_complexity",
-)
-# Its clippy.toml: a test may unwrap.
-CLIPPY = {"allow-unwrap-in-tests": "true"}
 HOOK_LIMIT = 10
 # In a project's Makefile: the hook works there.
 OPT_IN = "vladkens/lint/"
@@ -840,90 +820,6 @@ def fix(top: Path, scope: dict | None) -> int:
     return 0
 
 
-def lints(top: Path) -> int:
-    """Adds the LINTS a project lacks to its Cargo.toml, a workspace's members taking them, and the
-    CLIPPY settings to its clippy.toml."""
-    path = top / "Cargo.toml"
-    if not path.is_file():
-        sys.exit("rust-lint: no Cargo.toml at the top of the repository")
-
-    cfg = tomllib.loads(read(path))
-    ws = cfg.get("workspace")
-    have = (ws if ws is not None else cfg).get("lints", {}).get("clippy", {})
-    said = []
-    if new := [x for x in LINTS if x not in have]:
-        table = "workspace.lints.clippy" if ws is not None else "lints.clippy"
-        put(path, table, dict.fromkeys(new, '"warn"'))
-        said.append(f"Cargo.toml takes {count(len(new), 'clippy lint')}")
-
-    if ws is not None:
-        # Cargo excludes a path and all under it.
-        skip = [top / posixpath.normpath(x) for x in ws.get("exclude", [])]
-        dirs = [top] if "package" in cfg else []
-        dirs += [x for pat in ws.get("members", []) for x in sorted(top.glob(pat))]
-        for x in dirs:
-            toml, name = x / "Cargo.toml", x.relative_to(top).as_posix()
-            if any(x == y or y in x.parents for y in skip) or not toml.is_file():
-                continue
-
-            # A member with lints of its own can't take the workspace's: cargo allows one or other.
-            own = tomllib.loads(read(toml)).get("lints")
-            if own is None:
-                put(toml, "lints", {"workspace": "true"})
-                said.append(f"{name}/Cargo.toml takes the workspace's lints")
-                continue
-
-            new = [y for y in LINTS if y not in own.get("clippy", {})]
-            if own.get("workspace") is not True and new:
-                put(toml, "lints.clippy", dict.fromkeys(new, '"warn"'))
-                said.append(f"{name}/Cargo.toml takes {count(len(new), 'clippy lint')}")
-
-    conf = next((top / x for x in (".clippy.toml", "clippy.toml") if (top / x).is_file()), None)
-    conf = conf or top / "clippy.toml"
-    have = tomllib.loads(read(conf)) if conf.is_file() else {}
-    if new := [x for x in CLIPPY if x not in have]:
-        put(conf, None, {x: CLIPPY[x] for x in new})
-        said.append(f"{conf.name} takes {count(len(new), 'setting')}")
-
-    print(f"rust-lint: {'; '.join(said) or 'the project has the lints'}")
-    return 0
-
-
-def put(path: Path, table: str | None, items: dict[str, str]):
-    """Adds `key = value` lines to the end of a TOML table (None: the keys before the first table),
-    or the table to the end of the file; a file it can't place them in right asks for a hand."""
-    text = read(path) if path.is_file() else ""
-    eol = "\r\n" if "\r\n" in text else "\n"
-    rows = [f"{k} = {v}" for k, v in items.items()]
-    raws = text.removesuffix(eol).split(eol) if text else []
-    heads = [i for i, x in enumerate(raws) if x.lstrip().startswith("[")]
-    at = -1 if table is None else next((i for i in heads if raws[i].strip() == f"[{table}]"), None)
-    if at is None:
-        raws += ["", f"[{table}]", *rows] if raws else [f"[{table}]", *rows]
-    else:
-        end = next((i for i in heads if i > at), len(raws))
-        while end > at + 1 and not raws[end - 1].strip():
-            end -= 1
-
-        raws[end:end] = rows
-
-    out = eol.join(raws) + eol
-    try:
-        got = tomllib.loads(out)
-        for x in table.split(".") if table else []:
-            got = got[x]
-
-        ok = all(x in got for x in items)
-    except (tomllib.TOMLDecodeError, KeyError, TypeError):
-        ok = False
-
-    if not ok:
-        where = f"[{table}] of " if table else ""
-        sys.exit(f"rust-lint: add these to {where}{path.name} by hand:\n" + "\n".join(rows))
-
-    path.write_bytes(out.encode())
-
-
 def hook() -> int:
     try:
         pld = json.load(sys.stdin)
@@ -969,7 +865,7 @@ def main() -> int:
     cli = argparse.ArgumentParser(
         prog="rust-lint", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    cmds = ("check", "fix", "modules", "lints", "hook")
+    cmds = ("check", "fix", "modules", "hook")
     cli.add_argument("cmd", nargs="?", choices=cmds, default="check")
     cli.add_argument("--all", action="store_true", help="every line counts, not only changed ones")
     cli.add_argument("--base", help="count the changes from this commit")
@@ -984,9 +880,6 @@ def main() -> int:
     top = Path(top)
     if opts.cmd == "modules":
         return outline(top)
-
-    if opts.cmd == "lints":
-        return lints(top)
 
     since = None if opts.all else base(top, opts.base)
     scope = changed(top, since) if since else None
