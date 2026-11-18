@@ -353,6 +353,30 @@ class Rules(unittest.TestCase):
         self.assertIsNone(rl.resolve(cur, ["super", "super", "super", "x"]))
         self.assertIsNone(rl.resolve(cur, ["std", "fmt"]))
 
+    def test_kinds(self):
+        text = '//! A module.\n\n/// A function.\nfn a() {\n    // a step\n    let s = "x\ny";\n}\n'
+        text += "\n#[cfg(test)]\nmod tests {}\n"
+        self.assertEqual(rl.kinds(rl.scan(text)), {"code": 4, "docs": 2, "comm": 1, "tests": 2})
+
+    def test_module(self):
+        dirs = {"src", "src/ui", "src/ui/widgets", "src/text", "crates/a/src", "tests/hello/src"}
+        cases = {
+            "src/main.rs": "main",
+            "src/text.rs": "text",
+            "src/text/shape.rs": "text",
+            "src/ui/mod.rs": "ui",
+            "src/ui/form.rs": "ui",
+            "src/ui/widgets.rs": "ui/widgets",
+            "src/ui/widgets/button.rs": "ui/widgets",
+            "crates/a/src/lib.rs": "crates/a/lib",
+            "crates/a/benches/b.rs": "crates/a/benches",
+            "tests/hello/src/main.rs": "tests",
+            "examples/demo.rs": "examples",
+            "build.rs": "build",
+        }
+        for path, row in cases.items():
+            self.assertEqual(rl.module(path, dirs), row, path)
+
     def test_modules(self):
         texts = {
             "src/main.rs": 'mod a;\nmod b;\n#[path = "gen/c.rs"]\nmod c;\nuse crate::a::x;\n',
@@ -561,6 +585,24 @@ class Repo(unittest.TestCase):
         self.assertIn("src/a.rs:5: error[blank-line]", out)
         self.assertIn("src/b.rs:8: warning[long-comment]", out)
         self.assertIn("rust-lint: 2 errors, 1 warning in all lines\n", out)
+
+    def test_size(self):
+        self.write("src/b.rs", "//! B does it. And more.\n" + NEW + TESTS)
+        self.write("tests/t.rs", NEW)
+        code, out = self.check("size", "--vs", "main")
+        rows = {x.split()[0]: x.split()[1:] for x in out.splitlines() if not x.startswith("-")}
+        self.assertEqual(code, 0)
+        self.assertEqual(rows["b"], ["6", "33", "1", "0", "6", "+6"])
+        self.assertEqual(rows["a"], ["6", "33", "0", "0", "0", "+0"])
+        self.assertEqual(rows["total"], ["18", "100", "1", "0", "6", "+12"])
+        self.assertIn("src/b.rs", self.check("size", "--files")[1])
+        self.assertRegex(self.check("size", "--map")[1], r"src/b\.rs +6  B does it\n")
+        self.assertEqual(self.check("size", "--check")[0], 0)
+        with mock.patch.object(rl, "GROWTH", 5):
+            code, out = self.check("size", "--check")
+
+        self.assertEqual(code, 1)
+        self.assertIn("+6 lines of library code", out)
 
     def hook(self, **pld) -> dict:
         stdin = io.StringIO(json.dumps({"cwd": str(self.top)} | pld))

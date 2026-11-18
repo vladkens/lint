@@ -59,12 +59,16 @@ There it fetches the full history if the checkout is shallow, compares a pull re
 
 Errors fail the check. A warning lets a comment, an unwrap or a cycle stay when it's needed. A field kept for its `Drop` or an FFI layout takes a name that starts with `_`.
 
-| Command           | Does                                             |
-| ----------------- | ------------------------------------------------ |
-| `$(LINT)`         | checks the lines the branch changes              |
-| `$(LINT) --all`   | checks every line                                |
-| `$(LINT) fix`     | adds the missing blank lines                     |
-| `$(LINT) modules` | prints what each top module uses, and the cycles |
+| Command                  | Does                                                          |
+| ------------------------ | ------------------------------------------------------------- |
+| `$(LINT)`                | checks the lines the branch changes                           |
+| `$(LINT) --all`          | checks every line                                             |
+| `$(LINT) fix`            | adds the missing blank lines                                  |
+| `$(LINT) modules`        | prints what each top module uses, and the cycles              |
+| `$(LINT) size`           | code, docs, comments and tests per module; `--files` per file |
+| `$(LINT) size --map`     | each file, its code lines and the first sentence of its `//!` |
+| `$(LINT) size --vs main` | adds how the code of each module changed since main           |
+| `$(LINT) size --check`   | fails when the branch adds over 600 lines of library code     |
 
 ## 🤖 Agent hook
 

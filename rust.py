@@ -5,10 +5,11 @@
 """rust-lint: the checks of Rust repositories that clippy and rustfmt don't have, on the lines a
 branch changes.
 
-  rust-lint [--all] [--base REF]      check
-  rust-lint fix [--all] [--base REF]  add the missing blank lines
-  rust-lint modules                   what each top module uses
-  rust-lint hook                      Stop hook of Claude Code, Codex
+  rust-lint [--all] [--base REF]                         check
+  rust-lint fix [--all] [--base REF]                     add the missing blank lines
+  rust-lint modules                                      what each top module uses
+  rust-lint size [--files | --map | --check] [--vs REF]  lines per module
+  rust-lint hook                                         Stop hook of Claude Code, Codex
 
 Only the changed lines count, unless `--all`: the ones that differ from the merge base with the
 default branch (origin/main or main), uncommitted and untracked files included. On the default
@@ -30,6 +31,13 @@ branch that leaves the uncommitted changes; CI on the default branch checks its 
   new-use       the first use of a top module by another (note)
 
 Clippy runs on its own, from the project's Makefile, with its default lints.
+
+size counts the non-blank lines of code, docs, comments and tests (every line of a test item)
+per module: a folder under a package's src/, a file right in src/, the tests, examples and
+benches each as one. `--files` counts per file, `--map` lists each file's code lines and the first
+sentence of its `//!` doc, `--vs REF` adds how the code changed since REF. `--check` fails when the
+branch adds more than GROWTH lines of library code (under src/) since its base or REF, net of what
+it removes, the most one PR should add.
 
 rust-lint is `uv run --script https://raw.githubusercontent.com/vladkens/lint/main/rust.py`, the
 LINT of a project's Makefile. The hook reads the agent's Stop event on stdin and works in
@@ -56,6 +64,7 @@ from pathlib import Path
 DENSE = 12
 COMMENT = 3
 HOOK_LIMIT = 10
+GROWTH = 600
 # In a project's Makefile: the hook works there.
 OPT_IN = "vladkens/lint/"
 
@@ -821,6 +830,85 @@ def unseen(top: Path, warns: list[Hit]) -> list[Hit]:
     return new
 
 
+# MARK: Size
+
+KINDS = ("code", "docs", "comm", "tests")
+
+
+def kinds(sc: Scan) -> dict[str, int]:
+    """The non-blank lines of code, docs, comments and tests."""
+    n = dict.fromkeys(KINDS, 0)
+    for i, (raw, code) in enumerate(zip(sc.raws, sc.codes)):
+        if not raw.strip():
+            continue
+
+        if sc.test[i]:
+            n["tests"] += 1
+        elif code.strip() or i not in sc.noted:
+            n["code"] += 1
+        else:
+            n["docs" if DOC.match(raw) else "comm"] += 1
+
+    return n
+
+
+def place(path: str) -> tuple[list[str], list[str]] | None:
+    """A file under a package's src/: the package's folder and the path in src/, without `.rs`;
+    None for tests, examples, benches and build scripts."""
+    parts = path.removesuffix(".rs").split("/")
+    if "src" not in parts[:-1]:
+        return None
+
+    k = len(parts) - 2 - parts[-2::-1].index("src")
+    return None if TEST_DIRS & set(parts[:k]) else (parts[:k], parts[k + 1 :])
+
+
+def module(path: str, dirs: set[str]) -> str:
+    """The row a file counts in: its folder under src/, or the file when it's right in src/ or has
+    a folder of its own; the tests, examples and benches one each, after the package's folder."""
+    found = place(path)
+    if found is None:
+        parts = path.split("/")
+        k = next((i for i, x in enumerate(parts[:-1]) if x in TEST_DIRS), len(parts) - 1)
+        return "/".join(parts[: k + 1]).removesuffix(".rs")
+
+    pkg, rest = found
+    if len(rest) > 1 and path.removesuffix(".rs") not in dirs:
+        rest = rest[:-1]
+
+    return "/".join(pkg + rest)
+
+
+def summary(sc: Scan) -> str:
+    """The first sentence of a file's `//!` doc."""
+    doc = []
+    for raw in sc.raws:
+        s = raw.strip()
+        if s.startswith("//!"):
+            doc.append(s[3:].strip())
+        elif doc or (s and not s.startswith(("//", "#!["))):
+            break
+
+    first = re.split(r"(?<=\.)\s", " ".join(doc).strip(), maxsplit=1)[0].rstrip(".")
+    return first if len(first) <= 100 else first[:99].rstrip() + "…"
+
+
+def table(scans: "Scans", files: bool) -> dict[str, dict[str, int]]:
+    dirs = {posixpath.dirname(x) for x in scans.names}
+    rows = collections.defaultdict(lambda: dict.fromkeys(KINDS, 0))
+    for x in scans.names:
+        row = rows[x if files else module(x, dirs)]
+        for k, v in kinds(scans[x]).items():
+            row[k] += v
+
+    return rows
+
+
+def library(scans: "Scans") -> int:
+    """The code lines under the packages' src/."""
+    return sum(kinds(scans[x])["code"] for x in scans.names if place(x) is not None)
+
+
 # MARK: Commands
 
 
@@ -869,6 +957,57 @@ def outline(top: Path) -> int:
 
         for group in cycles(graph):
             print(f"  cycle: {', '.join(group)}")
+
+    return 0
+
+
+def size(top: Path, opts) -> int:
+    """Prints the lines per module or file, or checks how much library code the branch adds."""
+    scans = Scans(top)
+    if opts.check:
+        since = base(top, opts.vs or opts.base)
+        if not since:
+            return 0
+
+        added = library(scans) - library(Scans(top, snapshot(top, since, set())))
+        print(f"rust-lint: {added:+} lines of library code since {since[:7]}, at most {GROWTH}")
+        if added > GROWTH:
+            print(f"rust-lint: {added - GROWTH} over: split the work into several PRs")
+            return 1
+
+        return 0
+
+    if opts.map:
+        w = max(map(len, scans.names), default=0)
+        for x in sorted(scans.names, key=lambda x: (x.count("/"), x)):
+            print(f"{x:<{w}} {kinds(scans[x])['code']:>6}  {summary(scans[x])}")
+
+        return 0
+
+    rows = table(scans, opts.files)
+    since = base(top, opts.vs) if opts.vs else None
+    was = table(Scans(top, snapshot(top, since, set())), opts.files) if since else None
+    empty = dict.fromkeys(KINDS, 0)
+    names = sorted(set(rows) | set(was or {}), key=lambda x: (-rows.get(x, empty)["code"], x))
+    total = {k: sum(r[k] for r in rows.values()) for k in KINDS}
+    w = max(map(len, [*names, "module"]))
+    head = f"{'module':<{w}} {'code':>7} {'%':>4} {'docs':>6} {'comm':>6} {'tests':>6}"
+    head += f" {'vs ' + opts.vs:>10}" if was is not None else ""
+    print(head)
+    print("-" * len(head))
+    for x in [*names, None]:
+        if x is None:
+            print("-" * len(head))
+
+        r = total if x is None else rows.get(x, empty)
+        pct = 100 * r["code"] / max(total["code"], 1)
+        line = f"{x or 'total':<{w}} {r['code']:>7} {pct:>4.0f} {r['docs']:>6} {r['comm']:>6}"
+        line += f" {r['tests']:>6}"
+        if was is not None:
+            then = sum(y["code"] for y in was.values()) if x is None else was.get(x, empty)["code"]
+            line += f" {r['code'] - then:>+10}"
+
+        print(line)
 
     return 0
 
@@ -944,10 +1083,14 @@ def main() -> int:
     cli = argparse.ArgumentParser(
         prog="rust-lint", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    cmds = ("check", "fix", "modules", "hook")
+    cmds = ("check", "fix", "modules", "size", "hook")
     cli.add_argument("cmd", nargs="?", choices=cmds, default="check")
     cli.add_argument("--all", action="store_true", help="every line counts, not only changed ones")
     cli.add_argument("--base", help="count the changes from this commit")
+    cli.add_argument("--files", action="store_true", help="size: one row per file")
+    cli.add_argument("--map", action="store_true", help="size: each file and what it does")
+    cli.add_argument("--vs", metavar="REF", help="size: how the code changed since REF")
+    cli.add_argument("--check", action="store_true", help=f"size: at most {GROWTH} new lines")
     opts = cli.parse_args()
     if opts.cmd == "hook":
         return hook()
@@ -959,6 +1102,9 @@ def main() -> int:
     top = Path(top)
     if opts.cmd == "modules":
         return outline(top)
+
+    if opts.cmd == "size":
+        return size(top, opts)
 
     since = None if opts.all else base(top, opts.base)
     scope = changed(top, since) if since else None
