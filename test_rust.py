@@ -282,10 +282,15 @@ class Rules(unittest.TestCase):
             #[cfg(test)]
             use x;
             fn d() {}
+            #[cfg(any(test, target_os = "linux"))]
+            fn e() {}
+            #[cfg(all(test, unix))]
+            fn f() {}
         """)
         flags = rl.scan(text).test
         self.assertEqual(
-            [i + 1 for i, x in enumerate(flags) if x], [3, 4, 5, 6, 7, 9, 10, 11, 12, 13, 14]
+            [i + 1 for i, x in enumerate(flags) if x],
+            [3, 4, 5, 6, 7, 9, 10, 11, 12, 13, 14, 18, 19],
         )
 
     def test_unused_pub(self):
