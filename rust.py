@@ -23,6 +23,7 @@ branch that leaves the uncommitted changes; CI on the default branch checks its 
                 code (error)
   unused-pub    a new pub item that nothing else in the repository names, tests and doc examples
                 included; in check only in libraries: in a binary the compiler reports it (error)
+  unwrap        an unwrap outside tests, examples and build scripts (warning, as long-comment)
   cycle         a new use between the top modules of a crate that closes a cycle; with --all every
                 cycle (warning, as long-comment)
   new-use       the first use of a top module by another (note)
@@ -67,6 +68,7 @@ FN = re.compile(r"\bfn\s+(\w+)")
 MOD = re.compile(r"\bmod\s+(\w+)$")
 TEST = re.compile(r"#\[(?:cfg\((?:all\(|any\()?test\b|(?:\w+::)*test\b)")
 TEST_DIRS = {"tests", "benches", "examples"}
+UNWRAP = re.compile(r"\.\s*unwrap\s*\(\s*\)")
 DEAD = re.compile(r"#!?\[.*\b(?:allow|expect)\s*\(.*\b(?:dead_code|unused\w*)\b")
 PUB = re.compile(
     r"^\s*pub\s+(?:(?:const|async|unsafe|extern\s*(?:\"\")?)\s+)*"
@@ -331,6 +333,15 @@ def hits(path: str, sc: Scan, lines: set[int] | None) -> list[Hit]:
         for i, code in enumerate(sc.codes)
         if not sc.test[i] and near(i, i) and DEAD.search(code) and not PLATFORM.search(code)
     ]
+
+    msg = 'an unwrap panics without saying why: `?` if the function can fail, else `expect("why")`'
+    for i, code in enumerate(sc.codes):
+        if sc.test[i] or not near(i, i) or not UNWRAP.search(code):
+            continue
+
+        key = hashlib.sha1(f"{path}\n{sc.raws[i].strip()}".encode()).hexdigest()[:16]
+        out.append(Hit(path, i + 1, "unwrap", msg, "warning", key))
+
     return out
 
 
@@ -851,7 +862,7 @@ def hook() -> int:
         if new:
             why.append(
                 "A warning comes up once: shorten a long comment to what the reader needs, "
-                "untangle a cycle, or leave it if it's needed."
+                "replace an unwrap, untangle a cycle, or leave it if it's needed."
             )
 
         print(json.dumps({"decision": "block", "reason": "\n".join(why)}))

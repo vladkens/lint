@@ -155,6 +155,25 @@ fn e() {}
 fn f() {}
 """
 
+UNWRAP = """
+fn a() -> u8 {
+    let x = "1".parse::<u8>().unwrap(); // expect: unwrap
+    let y = "2".parse::<u8>().ok().unwrap_or(0);
+    let z = "3".parse::<u8>().expect("a digit");
+    // .unwrap() in a comment
+    let s = ".unwrap()";
+    x + y + z
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn t() {
+        "1".parse::<u8>().unwrap();
+    }
+}
+"""
+
 DEAD = """
 #![allow(unused_imports)] // expect: dead-code
 #[allow(dead_code)] // expect: dead-code
@@ -190,11 +209,16 @@ def found(text: str, path: str = "a.rs") -> list[tuple[int, str]]:
 
 class Rules(unittest.TestCase):
     def test_fixtures(self):
-        for text in (BLANK, DENSE, COMMENTS, DEAD):
+        for text in (BLANK, DENSE, COMMENTS, UNWRAP, DEAD):
             self.assertEqual(found(text), expected(text))
 
-    def test_long_comment_is_a_warning(self):
-        self.assertTrue(all(x.warn for x in rl.hits("a.rs", rl.scan(COMMENTS), None)))
+    def test_warnings(self):
+        for text in (COMMENTS, UNWRAP):
+            self.assertTrue(all(x.warn for x in rl.hits("a.rs", rl.scan(text), None)))
+
+    def test_unwrap_in_tests(self):
+        for path in ("tests/a.rs", "examples/a.rs", "build.rs"):
+            self.assertEqual(found(UNWRAP, path), [])
 
     def test_strip(self):
         cases = {
