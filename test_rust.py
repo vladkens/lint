@@ -143,6 +143,16 @@ fn d() {}
    counts
    too. */
 fn e() {}
+
+/// Empty lines and examples
+///
+/// don't count:
+///
+/// ```
+/// let a = 1;
+/// let b = 2;
+/// ```
+fn f() {}
 """
 
 DEAD = """

@@ -18,8 +18,8 @@ branch that leaves the uncommitted changes; CI on the default branch checks its 
   blank-line    a statement after an if / for / while / loop / match block starts after a blank
                 line (error; `fix` adds it)
   dense-block   more than DENSE statements in a row in a function, without a blank line (error)
-  long-comment  more than COMMENT comment lines in a row, `//!` aside (warning: locally each one is
-                shown once, in CI always)
+  long-comment  more than COMMENT comment lines in a row, `//!`, empty lines and doc examples aside
+                (warning: locally each one is shown once, in CI always)
   dead-code     an allow or expect of dead_code or unused_*, unless a platform or feature has the
                 code (error)
   unused-pub    a new pub item that nothing else in the repository names, tests and doc examples
@@ -282,19 +282,23 @@ def dense_blocks(sc: Scan) -> list[tuple[int, int, int]]:
     return out
 
 
-def long_comments(sc: Scan) -> list[tuple[int, int]]:
-    """Runs of more than COMMENT comment lines: first and last index."""
-    out, start = [], None
+def long_comments(sc: Scan) -> list[tuple[int, int, int]]:
+    """Runs of more than COMMENT lines of comment text: first and last index, and the count. Empty
+    comment lines and a doc comment's code examples don't count."""
+    out, start, n, fenced = [], None, 0, False
     for i, (raw, code) in enumerate(zip(sc.raws + [""], sc.codes + [""])):
         text = raw.strip()
         if i in sc.noted and text and not code.strip() and not text.startswith(("//!", "// MARK")):
             start = i if start is None else start
+            body = text.lstrip("/").strip()
+            fenced ^= body.startswith("```")
+            n += bool(body) and not fenced and not body.startswith("```")
             continue
 
-        if start is not None and i - start > COMMENT:
-            out.append((start, i - 1))
+        if start is not None and n > COMMENT:
+            out.append((start, i - 1, n))
 
-        start = None
+        start, n, fenced = None, 0, False
 
     return out
 
@@ -326,13 +330,13 @@ def hits(path: str, sc: Scan, lines: set[int] | None) -> list[Hit]:
         for a, b, n in dense_blocks(sc)
         if near(a, b)
     ]
-    for a, b in long_comments(sc):
+    for a, b, n in long_comments(sc):
         if not near(a, b):
             continue
 
         text = "\n".join(x.strip() for x in sc.raws[a : b + 1])
         key = hashlib.sha1(f"{path}\n{text}".encode()).hexdigest()[:16]
-        msg = f"{b - a + 1} comment lines; say only what the code can't, or keep it if it's needed"
+        msg = f"{n} comment lines; say only what the code can't, or keep it if it's needed"
         out.append(Hit(path, a + 1, "long-comment", msg, "warning", key))
 
     if testing(path):
