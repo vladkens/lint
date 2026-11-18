@@ -73,7 +73,7 @@ ATTR = re.compile(r"#!?\[")
 LINT_ATTR = re.compile(r"\s*(allow|expect|cfg_attr)\s*\(")
 BRACKETS = {"[": 1, "(": 1, "{": 1, "]": -1, ")": -1, "}": -1}
 REASON = re.compile(r"\breason\s*=")
-UNWRAP = re.compile(r"\.\s*unwrap\s*\(\s*\)")
+UNWRAP = re.compile(r"\.\s*unwrap\s*\(\s*\)|\b(?:Option|Result)\s*::\s*unwrap\b")
 DEAD = re.compile(r"#!?\[.*\b(?:allow|expect)\s*\(.*\b(?:dead_code|unused\w*)\b")
 PUB = re.compile(
     r"^\s*pub\s+(?:(?:const|async|unsafe|extern\s*(?:\"\")?)\s+)*"

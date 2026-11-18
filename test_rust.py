@@ -162,6 +162,7 @@ fn a() -> u8 {
     let z = "3".parse::<u8>().expect("a digit");
     // .unwrap() in a comment
     let s = ".unwrap()";
+    let v: Vec<u8> = [Some(1)].into_iter().map(Option::unwrap).collect(); // expect: unwrap
     x + y + z
 }
 
